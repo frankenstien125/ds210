@@ -1,14 +1,13 @@
 use csv::ReaderBuilder;
-use serde::Deserialize;
+use serde_derive::Deserialize;
 use std::error::Error;
 use std::fs::File;
 use std::collections::HashMap;
 use petgraph::graph::{Graph, NodeIndex};
-use petgraph::algo::louvain::Louvain;
-use petgraph::EdgeType;
+use petgraph::algo::Louvain::Louvain;
+use petgraph::visit::EdgeRef;
 use ndarray::Array2;
-use ndarray_stats::QuantileExt;
-use smartcore::cluster::kmeans::*;
+use smartcore::cluster::kmeans::KMeans;
 use smartcore::dataset::*;
 use smartcore::linalg::basic::matrix::DenseMatrix;
 
@@ -70,7 +69,7 @@ fn load_and_preprocess_data(csv_file_path: &str) -> Result<Vec<EducationData>, B
     Ok(data)
 }
 
-fn construct_graph(data: &[(EducationData)]) -> Result<(Graph<String, f64>, Vec<String>), Box<dyn Error>> {
+fn construct_graph(data: &[EducationData]) -> Result<(Graph<String, f64>, Vec<String>), Box<dyn Error>> {
     // Create a new graph
     let mut graph = Graph::new_undirected();
 
@@ -130,7 +129,7 @@ fn print_clusters(clusters: &Vec<Vec<NodeIndex>>, node_labels: &Vec<String>) {
     }
 }
 
-fn compute_k_means(graph: &Graph<String, f64>, data: &[(EducationData)]) -> Result<Vec<usize>, Box<dyn Error>> {
+fn compute_k_means(graph: &Graph<String, f64>, data: &[EducationData]) -> Result<Vec<usize>, Box<dyn Error>> {
     // Convert graph adjacency matrix to ndarray::Array2
     let num_nodes = graph.node_count();
     let mut adjacency_matrix = Array2::zeros((num_nodes, num_nodes));
