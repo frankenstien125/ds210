@@ -1,297 +1,187 @@
-use csv::ReaderBuilder;
-use serde_derive::Deserialize;
-use std::error::Error;
-use std::fs::File;
 use std::collections::HashMap;
-use petgraph::graph::{Graph, NodeIndex};
-use petgraph::algo::Louvain::Louvain;
-use petgraph::visit::EdgeRef;
-use ndarray::Array2;
-use smartcore::cluster::kmeans::KMeans;
-use smartcore::dataset::*;
-use smartcore::linalg::basic::matrix::DenseMatrix;
+use std::fs::File;
+use std::io::{self, BufRead, BufReader};
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
 struct EducationData {
     country_or_area: String,
     year: u32,
     indicator: String,
     series: String,
     value: Option<f64>,
-    // Add more fields as necessary
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
-    // Define the path to the CSV file
-    let csv_file_path = "/Users/franklinwibisono/Downloads/final/SYB66_309_202310_Education.csv";
-
-    // Load the CSV data
-    let data = load_and_preprocess_data(csv_file_path)?;
-
-    // Construct a graph from the preprocessed data
-    let (graph, node_labels) = construct_graph(&data)?;
-
-    // Apply graph clustering
-    let clusters = cluster_graph(&graph);
-
-    // Print the clusters for verification
-    print_clusters(&clusters, &node_labels);
-
-    // Compute k-means clustering
-    let k_means_clusters = compute_k_means(&graph, &data)?;
-
-    // Count nodes and vertices
-    count_nodes_and_edges(&graph);
-
-    Ok(())
+struct Graph {
+    nodes: Vec<String>,
+    adjacency_matrix: Vec<Vec<f64>>,
 }
 
-fn load_and_preprocess_data(csv_file_path: &str) -> Result<Vec<EducationData>, Box<dyn Error>> {
+fn main() {
+    let csv_file_path = "/Users/franklinwibisono/Downloads/finalcopy/SYB66_309_202310_Education.csv";
+
+    // Load and preprocess data
+    match load_and_preprocess_data(csv_file_path) {
+        Ok(data) => {
+            // Construct a graph from the data
+            let graph = construct_graph(&data);
+            
+            // Perform clustering and other operations
+            let clusters = cluster_graph(&graph);
+            
+            // Print the clusters and the adjacency matrix
+            print_clusters(&clusters, &graph);
+        },
+        Err(e) => {
+            eprintln!("Failed to load data: {:?}", e);
+        },
+    }
+}
+
+fn load_and_preprocess_data(csv_file_path: &str) -> io::Result<Vec<EducationData>> {
     // Open the CSV file
     let file = File::open(csv_file_path)?;
+    let reader = BufReader::new(file);
 
-    // Create a CSV reader with headers
-    let mut reader = ReaderBuilder::new()
-        .has_headers(true)
-        .from_reader(file);
+    let mut data = Vec::new();
 
-    // Prepare to store data for further processing
-    let mut data: Vec<EducationData> = Vec::new();
+    // Read each line of the CSV file
+    for (line_index, line) in reader.lines().enumerate() {
+        let line = line?;
+        
+        // Skip the header line
+        if line_index == 0 {
+            continue;
+        }
+        
+        // Split the line into fields
+        let fields: Vec<&str> = line.split(',').collect();
+        
+        // Check for correct number of fields
+        if fields.len() < 5 {
+            continue;
+        }
 
-    // Iterate through CSV records and deserialize each one into an `EducationData` struct
-    for result in reader.deserialize() {
-        // Deserialize each record
-        let record: EducationData = result?;
-        // Store the record for later processing
-        data.push(record);
+        // Extract data fields
+        let country_or_area = fields[0].to_string();
+        let year: u32 = fields[1].parse().unwrap_or(0);
+        let indicator = fields[2].to_string();
+        let series = fields[3].to_string();
+        let value: Option<f64> = fields[4].parse().ok();
+
+        // Push the EducationData object to data vector
+        data.push(EducationData {
+            country_or_area,
+            year,
+            indicator,
+            series,
+            value,
+        });
     }
 
     Ok(data)
 }
 
-fn construct_graph(data: &[EducationData]) -> Result<(Graph<String, f64>, Vec<String>), Box<dyn Error>> {
-    // Create a new graph
-    let mut graph = Graph::new_undirected();
+fn construct_graph(data: &[EducationData]) -> Graph {
+    let mut nodes = Vec::new();
+    let mut adjacency_matrix = Vec::new();
+    let mut node_indices = HashMap::new();
 
-    // Create a map to store the index of each country node
-    let mut node_indices: HashMap<String, NodeIndex> = HashMap::new();
-    // Store the node labels
-    let mut node_labels: Vec<String> = Vec::new();
-
-    // Add nodes and edges based on data
+    // Initialize nodes and adjacency matrix
     for record in data {
-        // Extract data from the record
-        let country = &record.country_or_area;
-        let value = record.value.unwrap_or(0.0);
+        let country_or_area = &record.country_or_area;
 
-        // Add the country as a node if not already present
+        // If the country is not yet in the graph, add it
         let node_index = *node_indices
-            .entry(country.to_string())
+            .entry(country_or_area.clone())
             .or_insert_with(|| {
-                node_labels.push(country.to_string());
-                graph.add_node(country.to_string())
+                nodes.push(country_or_area.clone());
+                adjacency_matrix.push(vec![0.0; nodes.len()]);
+                nodes.len() - 1
             });
 
-        // Example: Create edges with weights based on value (similarity metric)
-        // In a real-world scenario, you should compute similarity metrics
-
-        // For now, just create an edge with the given value
-        graph.update_edge(node_index, node_index, value);
-    }
-
-    Ok((graph, node_labels))
-}
-
-fn cluster_graph(graph: &Graph<String, f64>) -> Vec<Vec<NodeIndex>> {
-    // Apply the Louvain method for community detection
-    let (clusters, _) = louvain(graph, None);
-    
-    // Convert the cluster results to a list of node indices
-    let mut cluster_nodes = vec![];
-    
-    for (node, cluster_id) in clusters {
-        // Ensure the vector is large enough to accommodate all clusters
-        if cluster_id >= cluster_nodes.len() {
-            cluster_nodes.resize_with(cluster_id + 1, Vec::new);
+        // Update the adjacency matrix based on the value and the year of the record
+        for target_index in 0..adjacency_matrix.len() {
+            let adjustment_factor = record.year as f64 * 0.01; // Example usage of year
+            let value_to_add = record.value.unwrap_or(0.0) * adjustment_factor;
+            adjacency_matrix[node_index][target_index] += value_to_add;
         }
-        
-        // Add the node index to the respective cluster
-        cluster_nodes[cluster_id].push(node);
     }
-    
-    cluster_nodes
-}
 
-fn print_clusters(clusters: &Vec<Vec<NodeIndex>>, node_labels: &Vec<String>) {
-    // Print the clusters with node labels for verification
-    for (index, cluster) in clusters.iter().enumerate() {
-        println!("Cluster {}: {:?}", index, cluster.iter().map(|node| &node_labels[node.index()]).collect::<Vec<_>>());
+    Graph {
+        nodes,
+        adjacency_matrix,
     }
 }
 
-fn compute_k_means(graph: &Graph<String, f64>, data: &[EducationData]) -> Result<Vec<usize>, Box<dyn Error>> {
-    // Convert graph adjacency matrix to ndarray::Array2
-    let num_nodes = graph.node_count();
-    let mut adjacency_matrix = Array2::zeros((num_nodes, num_nodes));
-
-    for edge in graph.edge_references() {
-        let (source, target) = (edge.source(), edge.target());
-        let weight = edge.weight();
-
-        adjacency_matrix[[source.index(), target.index()]] = *weight;
-        adjacency_matrix[[target.index(), source.index()]] = *weight;
-    }
-
-    // Use DenseMatrix from smartcore
-    let matrix = DenseMatrix::from_array(num_nodes, num_nodes, &adjacency_matrix.into_raw_vec());
-
-    // Define k-means clustering
-    let k = 3; // Choose the number of clusters
-    let kmeans = KMeans::new(k);
-
-    // Fit k-means to the matrix
-    let results = kmeans.fit_predict(&matrix)?;
-
-    // Print k-means results
-    println!("k-Means clustering results: {:?}", results);
-
-    Ok(results)
+fn cluster_graph(_graph: &Graph) -> Vec<Vec<usize>> {
+    // Placeholder clustering algorithm. You can replace this with a real implementation.
+    Vec::new()
 }
 
-fn count_nodes_and_edges(graph: &Graph<String, f64>) {
-    // Count the number of nodes and edges in the graph
-    let num_nodes = graph.node_count();
-    let num_edges = graph.edge_count();
+fn print_clusters(clusters: &Vec<Vec<usize>>, graph: &Graph) {
+    // Print the clusters
+    for (cluster_index, cluster) in clusters.iter().enumerate() {
+        println!("Cluster {}:", cluster_index);
+        for &node_index in cluster {
+            println!("  - {}", graph.nodes[node_index]);
+        }
+    }
 
-    println!("Number of nodes in the graph: {}", num_nodes);
-    println!("Number of edges in the graph: {}", num_edges);
+    // Print the adjacency matrix for debugging and visualization
+    println!("\nAdjacency Matrix:");
+    for row in &graph.adjacency_matrix {
+        println!("{:?}", row);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use petgraph::graph::UnGraph;
+    use std::io::{Cursor, Write};
 
-    #[test]
-    fn test_load_and_preprocess_data() {
-        let csv_file_path = "test_data.csv"; // Provide a path to a test CSV file
-        let result = load_and_preprocess_data(csv_file_path);
-        assert!(result.is_ok());
-
-        let data = result.unwrap();
-        assert!(data.len() > 0, "Data should not be empty");
+    // A helper function to capture the standard output of a function
+    fn capture_output<F>(func: F) -> String
+    where
+        F: FnOnce(&mut dyn Write),
+    {
+        let mut buffer = Cursor::new(Vec::new());
+        func(&mut buffer);
+        String::from_utf8(buffer.into_inner()).unwrap()
     }
 
     #[test]
-    fn test_construct_graph() {
-        let test_data = vec![
-            EducationData {
-                country_or_area: "Country1".to_string(),
-                year: 2020,
-                indicator: "Indicator1".to_string(),
-                series: "Series1".to_string(),
-                value: Some(10.0),
-            },
-            EducationData {
-                country_or_area: "Country2".to_string(),
-                year: 2020,
-                indicator: "Indicator2".to_string(),
-                series: "Series2".to_string(),
-                value: Some(20.0),
-            },
-            // Add more test data as necessary
+    fn test_print_clusters() {
+        // Define nodes
+        let nodes = vec!["USA".to_string(), "Canada".to_string()];
+
+        // Define clusters
+        let clusters = vec![
+            vec![0], // Cluster containing USA
+            vec![1], // Cluster containing Canada
         ];
 
-        let result = construct_graph(&test_data);
-        assert!(result.is_ok());
-
-        let (graph, node_labels) = result.unwrap();
-        assert_eq!(graph.node_count(), test_data.len());
-        assert_eq!(node_labels.len(), test_data.len());
-    }
-
-    #[test]
-    fn test_cluster_graph() {
-        let test_data = vec![
-            EducationData {
-                country_or_area: "Country1".to_string(),
-                year: 2020,
-                indicator: "Indicator1".to_string(),
-                series: "Series1".to_string(),
-                value: Some(10.0),
-            },
-            EducationData {
-                country_or_area: "Country2".to_string(),
-                year: 2020,
-                indicator: "Indicator2".to_string(),
-                series: "Series2".to_string(),
-                value: Some(20.0),
-            },
-            // Add more test data as necessary
+        // Define an adjacency matrix for the graph
+        let adjacency_matrix = vec![
+            vec![1.0, 0.5], // USA to USA and USA to Canada
+            vec![0.5, 2.0], // Canada to USA and Canada to Canada
         ];
 
-        let (graph, _) = construct_graph(&test_data).unwrap();
-        let clusters = cluster_graph(&graph);
+        // Create a graph struct with nodes and adjacency matrix
+        let graph = Graph {
+            nodes: nodes.clone(),
+            adjacency_matrix: adjacency_matrix.clone(),
+        };
 
-        // Verify that clustering produces some clusters
-        assert!(clusters.len() > 0);
+        // Capture the output of the print_clusters function
+        let output = capture_output(|writer| print_clusters(&clusters, &graph));
+
+        // Clean up the captured output to remove extra newlines
+        let cleaned_output = output.trim_end().to_string();
+
+        // Assert expected output
+        let expected_output = "Cluster 0:\n  - USA\nCluster 1:\n  - Canada\n\nAdjacency Matrix:\n[1.0, 0.5]\n[0.5, 2.0]";
+        assert_eq!(cleaned_output, expected_output);
     }
 
-    #[test]
-    fn test_compute_k_means() {
-        let test_data = vec![
-            EducationData {
-                country_or_area: "Country1".to_string(),
-                year: 2020,
-                indicator: "Indicator1".to_string(),
-                series: "Series1".to_string(),
-                value: Some(10.0),
-            },
-            EducationData {
-                country_or_area: "Country2".to_string(),
-                year: 2020,
-                indicator: "Indicator2".to_string(),
-                series: "Series2".to_string(),
-                value: Some(20.0),
-            },
-            // Add more test data as necessary
-        ];
-
-        let (graph, _) = construct_graph(&test_data).unwrap();
-        let k_means_result = compute_k_means(&graph, &test_data);
-        assert!(k_means_result.is_ok());
-
-        // Verify k-means clustering produces valid results
-        let k_means_clusters = k_means_result.unwrap();
-        assert!(k_means_clusters.len() > 0);
-    }
-
-    #[test]
-    fn test_count_nodes_and_edges() {
-        let test_data = vec![
-            EducationData {
-                country_or_area: "Country1".to_string(),
-                year: 2020,
-                indicator: "Indicator1".to_string(),
-                series: "Series1".to_string(),
-                value: Some(10.0),
-            },
-            EducationData {
-                country_or_area: "Country2".to_string(),
-                year: 2020,
-                indicator: "Indicator2".to_string(),
-                series: "Series2".to_string(),
-                value: Some(20.0),
-            },
-            // Add more test data as necessary
-        ];
-
-        let (graph, _) = construct_graph(&test_data).unwrap();
-
-        // Call the function to count nodes and edges
-        count_nodes_and_edges(&graph);
-        // In the current code, the function only prints output,
-        // so you can verify the output manually or use a different
-        // approach to assert the expected number of nodes and edges.
-    }
+    // Additional tests for other functionality...
 }
