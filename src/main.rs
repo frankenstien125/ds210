@@ -183,5 +183,4 @@ mod tests {
         assert_eq!(cleaned_output, expected_output);
     }
 
-    // Additional tests for other functionality...
 }
